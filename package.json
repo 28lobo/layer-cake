@@ -4,11 +4,11 @@
   "private": true,
   "scripts": {
   "dev": "next dev",
-  "build": "next build",
+  "build": "npm run lint && next build",
   "start": "next start",
-  "lint": "next lint .",      
-  "test": "vitest",        
-  "test:ci": "vitest run",    
+  "lint": "eslint .",           
+  "test": "vitest",             
+  "test:ci": "vitest run",      
   "predev": "npm run typegen",
   "prebuild": "npm run typegen",
   "typegen": "sanity schema extract --enforce-required-fields --path=./sanity/extract.json && sanity typegen generate"
