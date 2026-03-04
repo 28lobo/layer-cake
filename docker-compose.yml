@@ -1,0 +1,16 @@
+
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SANITY_PROJECT_ID: ${NEXT_PUBLIC_SANITY_PROJECT_ID}
+        NEXT_PUBLIC_SANITY_DATASET: ${NEXT_PUBLIC_SANITY_DATASET}
+    ports:
+      - "3000:3000"
+    
+    # Add this block to explicitly target your local environment file
+    env_file:
+      - .env.local
