@@ -1,4 +1,4 @@
-name: Next.js CI/CD Pipeline
+name: layer-cake CI/CD Pipeline
 
 on:
   push:
@@ -12,31 +12,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # --- Job 1: Quality Gates ---
+  # ==========================================
+  # STAGE 1: Quality Gates
+  # ==========================================
   quality-check:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: 'npm' # Automates basic npm caching
-
-      - name: Install Dependencies
-        run: npm ci
-
-      - name: Run Lint
-        run: npm run lint
-
-      - name: Run Tests
-        run: npm test
-
-  # --- Job 2: Build Application ---
-  build:
-    needs: quality-check # Only runs if tests pass
+    name: 🧪 Lint & Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -48,20 +28,126 @@ jobs:
           node-version: "20"
           cache: 'npm'
 
-      - name: Restore Next.js Cache
-        uses: actions/cache@v4
-        with:
-          path: .next/cache
-          # Key changes when dependencies or source files change
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
-          restore-keys: |
-            ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}-
-
       - name: Install Dependencies
         run: npm ci
 
-      - name: Build Project
-        run: npm run build
+      - name: Run Lint
+        run: npm run lint
+
+      # Uncomment if you add automated tests later
+      # - name: Run Tests
+      #   run: npm test
+
+  # ==========================================
+  # STAGE 2: Build & Push Docker Image
+  # ==========================================
+  build-and-push:
+    name: 📦 Build & Push to GHCR
+    needs: quality-check # Only runs if Stage 1 passes
+    runs-on: ubuntu-latest
+    
+    # ⚠️ CRITICAL: Permission to push to GitHub Container Registry
+    permissions:
+      contents: read
+      packages: write 
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          # Inject Sanity variables so Next.js can build successfully
+          build-args: |
+            NEXT_PUBLIC_SANITY_PROJECT_ID=${{ secrets.NEXT_PUBLIC_SANITY_PROJECT_ID }}
+            NEXT_PUBLIC_SANITY_DATASET=${{ secrets.NEXT_PUBLIC_SANITY_DATASET }}
+
+  # ==========================================
+  # STAGE 3: Deploy to EC2
+  # ==========================================
+  deploy:
+    name: 🚀 Deploy to Production
+    needs: build-and-push # Only runs if Stage 2 passes
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # 1. Authenticate EC2 with GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # 2. Define the exact image tag we just built
+            IMAGE="ghcr.io/${{ github.repository }}:${{ github.sha }}"
+
+            # 3. Pull the new image
+            docker pull $IMAGE
+
+            # 4. Stop and remove the old container
+            docker stop layer-cake || true
+            docker rm layer-cake || true
+
+            # 5. Run the new container
+            docker run -d \
+              --name layer-cake \
+              --restart always \
+              -p 80:3000 \
+              -e NEXT_PUBLIC_SANITY_PROJECT_ID="${{ secrets.NEXT_PUBLIC_SANITY_PROJECT_ID }}" \
+              -e NEXT_PUBLIC_SANITY_DATASET="${{ secrets.NEXT_PUBLIC_SANITY_DATASET }}" \
+              $IMAGE
+
+  # ==========================================
+  # STAGE 4: Verify Live Deployment
+  # ==========================================
+  verify-live:
+    name: 🌍 Verify Live App
+    needs: deploy # Only runs if Stage 3 finishes
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Wait for service to boot
+        run: |
+          echo "⏳ Waiting 30 seconds for Next.js to start inside Docker..."
+          sleep 30 
+
+      - name: Check Health
         env:
-          NEXT_PUBLIC_SANITY_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_SANITY_PROJECT_ID }}
-          NEXT_PUBLIC_SANITY_DATASET: ${{ secrets.NEXT_PUBLIC_SANITY_DATASET }}
+          LIVE_URL: "http://${{ secrets.EC2_HOST }}" 
+        run: |
+          echo "🔍 Checking $LIVE_URL..."
+          
+          # Retry up to 5 times
+          for i in {1..5}; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" $LIVE_URL)
+            
+            if [ "$response" == "200" ]; then
+              echo "✅ Success! App is live and returning 200 OK."
+              exit 0
+            else
+              echo "⚠️ Attempt $i: Got status $response. Retrying in 5s..."
+              sleep 5
+            fi
+          done
+          
+          echo "❌ Failed: App did not return 200 OK."
+          exit 1
